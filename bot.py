@@ -35,9 +35,10 @@ DATA_PATH = os.path.join(DATA_DIR, "balances.json")
 
 def load_config() -> dict:
     """Load config from environment variables (Render) or config.json (local)."""
-    if os.getenv("DISCORD_TOKEN"):
+    token = os.getenv("DISCORD_TOKEN") or os.getenv("BOT_TOKEN")
+    if token:
         return {
-            "token": os.environ["DISCORD_TOKEN"],
+            "token": token,
             "owner_id": int(os.environ.get("OWNER_ID", "0")),
             "prefix": os.environ.get("PREFIX", "Z"),
             "starting_balance": int(os.environ.get("STARTING_BALANCE", "100000")),
