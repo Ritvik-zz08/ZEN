@@ -1236,7 +1236,7 @@ class UnoColorPickerView(View):
     """Ephemeral view for picking a color after playing a Wild card."""
 
     def __init__(self, game: UnoGame, card_index: int, player: UnoPlayer):
-        super().__init__(timeout=30)
+        super().__init__(timeout=None)
         self.game = game
         self.card_index = card_index
         self.player = player
@@ -1267,15 +1267,14 @@ class UnoColorPickerView(View):
         self.stop()
 
     async def on_timeout(self):
-        self.chosen = random.choice(UNO_COLORS)
-        self.stop()
+        pass
 
 
 class UnoHandView(View):
     """Ephemeral view showing a player's hand as buttons they can click to play."""
 
     def __init__(self, game: UnoGame, player: UnoPlayer):
-        super().__init__(timeout=55)
+        super().__init__(timeout=None)
         self.game = game
         self.player = player
         self.played = False
@@ -1421,18 +1420,21 @@ async def _uno_process_played_card(game: UnoGame, player: UnoPlayer, card: UnoCa
 
 
 async def _uno_update_game(game: UnoGame):
-    """Update the main game message with current state."""
+    """Send a fresh game-state message each turn so players never have to scroll up."""
     if game.finished:
         return
-    embed = game.build_game_embed()
-    view = UnoGameView(game)
+    # Disable buttons on the old message so it doesn't clutter
     if game.message:
         try:
-            await game.message.edit(embed=embed, view=view)
-        except discord.NotFound:
-            game.message = await game.channel.send(embed=embed, view=view)
-    else:
-        game.message = await game.channel.send(embed=embed, view=view)
+            old_embed = game.build_game_embed()
+            old_embed.set_footer(text="⬇️ See below for the latest turn.")
+            await game.message.edit(embed=old_embed, view=None)
+        except Exception:
+            pass
+    # Send a brand-new message with buttons at the bottom of chat
+    embed = game.build_game_embed()
+    view = UnoGameView(game)
+    game.message = await game.channel.send(embed=embed, view=view)
 
 
 async def _uno_end_game(game: UnoGame):
@@ -1463,7 +1465,7 @@ class UnoGameView(View):
     """Main game view with View Hand, Draw Card, and Call UNO buttons."""
 
     def __init__(self, game: UnoGame):
-        super().__init__(timeout=300)  # 5-minute timeout
+        super().__init__(timeout=None)  # No timeout
         self.game = game
 
     @discord.ui.button(label="View Hand", style=discord.ButtonStyle.primary, emoji="🃏")
@@ -1544,31 +1546,14 @@ class UnoGameView(View):
                 "❌ You can only call UNO when you have 2 or fewer cards!", ephemeral=True)
 
     async def on_timeout(self):
-        """If the game times out, end it."""
-        if not self.game.finished:
-            self.game.finished = True
-            embed = discord.Embed(
-                title="⏰ UNO — Timed Out",
-                description="Game expired due to inactivity.",
-                color=0xFFA500)
-            if self.game.entry_fee > 0:
-                # Refund everyone
-                for p in self.game.players:
-                    add_balance(p.user.id, self.game.entry_fee, STARTING)
-                embed.add_field(name="Refund", value="All entry fees have been refunded.", inline=False)
-            if self.game.message:
-                try:
-                    await self.game.message.edit(embed=embed, view=None)
-                except Exception:
-                    pass
-            _active_uno.pop(self.game.channel.id, None)
+        pass  # No timeout — game runs until someone wins
 
 
 class UnoLobbyView(View):
     """Pre-game lobby with Join and Start buttons."""
 
     def __init__(self, game: UnoGame):
-        super().__init__(timeout=120)
+        super().__init__(timeout=None)  # No timeout
         self.game = game
 
     def build_embed(self) -> discord.Embed:
@@ -1668,22 +1653,7 @@ class UnoLobbyView(View):
         await interaction.response.edit_message(embed=self.build_embed(), view=self)
 
     async def on_timeout(self):
-        if not self.game.started:
-            # Refund everyone
-            if self.game.entry_fee > 0:
-                for p in self.game.players:
-                    add_balance(p.user.id, self.game.entry_fee, STARTING)
-            self.game.finished = True
-            embed = discord.Embed(
-                title="⏰ UNO — Lobby Expired",
-                description="Not enough players joined in time. Entry fees refunded.",
-                color=0xFFA500)
-            if self.game.lobby_message:
-                try:
-                    await self.game.lobby_message.edit(embed=embed, view=None)
-                except Exception:
-                    pass
-            _active_uno.pop(self.game.channel.id, None)
+        pass  # No timeout — lobby stays open until host starts
 
 
 @bot.command(name="uno")
