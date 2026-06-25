@@ -1178,14 +1178,15 @@ class UnoGame:
         return False
 
     def build_game_embed(self) -> discord.Embed:
-        """Build the main game state embed."""
+        """Build the main game state embed with the top card shown as a large image."""
         top = self.top_card
         color_hex = UNO_COLOR_HEX.get(top.effective_color, 0x9B59B6)
 
         embed = discord.Embed(title="🎴 UNO", color=color_hex)
 
-        # Top card display
-        top_display = top.display
+        # ── Top card: use custom emoji if available, else text ────────────────
+        card_emoji = _card_emoji_str(top)
+        top_display = card_emoji
         if top.color == "Wild" and top.chosen_color:
             top_display += f" → {UNO_COLOR_EMOJI[top.chosen_color]}"
 
@@ -1204,8 +1205,14 @@ class UnoGame:
 
         embed.add_field(name="Players", value="\n".join(player_lines), inline=False)
 
-        if self.entry_fee > 0:
-            embed.set_footer(text=f"Prize Pot: {self.pot:,} Coins")
+        # ── Attach full-size card image via Discord CDN URL ───────────────────
+        key = _card_emoji_key(top)
+        eid = _uno_card_emojis.get(key)
+        if eid:
+            embed.set_image(url=f"https://cdn.discordapp.com/emojis/{eid}.png?size=256")
+
+        footer_text = f"Prize Pot: {self.pot:,} Coins" if self.entry_fee > 0 else ""
+        embed.set_footer(text=footer_text)
 
         return embed
 
@@ -1228,6 +1235,71 @@ class UnoGame:
 
 # ── Active UNO games per channel ─────────────────────────────────────────────
 _active_uno: dict[int, UnoGame] = {}  # channel_id -> UnoGame
+
+# ── UNO card emoji cache: "red_7" -> emoji_id (int) ──────────────────────────
+_uno_card_emojis: dict[str, int] = {}
+
+
+def _card_emoji_key(card: "UnoCard") -> str:
+    """Return the filename key used for this card's emoji, e.g. 'red_7', 'wild_draw4'."""
+    if card.color == "Wild":
+        return "wild_draw4" if card.value == "Wild +4" else "wild"
+    val_map = {"Skip": "skip", "Reverse": "reverse", "+2": "draw2"}
+    return f"{card.color.lower()}_{val_map.get(card.value, card.value)}"
+
+
+def _card_emoji_str(card: "UnoCard") -> str:
+    """Return an inline emoji string if uploaded, otherwise fall back to text display."""
+    key = _card_emoji_key(card)
+    eid = _uno_card_emojis.get(key)
+    if eid:
+        name = f"uno_{key.replace('-', '_')}"
+        return f"<:{name}:{eid}>"
+    return card.display
+
+
+async def _setup_uno_emojis(guild: discord.Guild) -> None:
+    """Upload all UNO card PNGs as custom emojis to the guild (once per card)."""
+    import os
+    CARDS_DIR = os.path.join(BASE_DIR, "assets", "uno_cards")
+
+    # Auto-generate cards if the folder doesn't exist yet
+    if not os.path.exists(CARDS_DIR) or not os.listdir(CARDS_DIR):
+        try:
+            import generate_uno_cards  # runs the generator on import
+        except Exception as e:
+            logging.warning(f"[UNO] Could not auto-generate card images: {e}")
+            return
+
+    if not os.path.exists(CARDS_DIR):
+        return
+
+    existing = {e.name: e for e in guild.emojis}
+    uploaded = 0
+
+    for filename in sorted(os.listdir(CARDS_DIR)):
+        if not filename.endswith(".png"):
+            continue
+        key = filename[:-4]                          # e.g. "red_7"
+        emoji_name = f"uno_{key.replace('-', '_')}" # e.g. "uno_red_7" (≤32 chars, alphanum+_)
+
+        if emoji_name in existing:
+            _uno_card_emojis[key] = existing[emoji_name].id
+            continue
+
+        # Upload the emoji
+        try:
+            with open(os.path.join(CARDS_DIR, filename), "rb") as f:
+                image_bytes = f.read()
+            emoji = await guild.create_custom_emoji(name=emoji_name, image=image_bytes,
+                                                    reason="UNO card emoji auto-setup")
+            _uno_card_emojis[key] = emoji.id
+            uploaded += 1
+            await asyncio.sleep(0.6)  # stay well under rate limit
+        except discord.HTTPException as exc:
+            logging.warning(f"[UNO] Failed to upload {emoji_name}: {exc}")
+
+    logging.info(f"[UNO] Emoji setup complete — {uploaded} uploaded, {len(_uno_card_emojis)} total cached.")
 
 
 # ── UNO Views ────────────────────────────────────────────────────────────────
@@ -1877,6 +1949,14 @@ async def on_ready():
     print(f"[*]  Connected to {len(bot.guilds)} guild(s)")
     await bot.change_presence(
         activity=discord.Game(name=f"{config['prefix']}help | 🎰 Gambling"))
+
+    # Auto-upload UNO card emojis to every connected guild
+    for guild in bot.guilds:
+        try:
+            print(f"[UNO] Setting up card emojis in: {guild.name}")
+            await _setup_uno_emojis(guild)
+        except Exception as exc:
+            print(f"[UNO] Emoji setup failed for {guild.name}: {exc}")
 
 
 @bot.event
