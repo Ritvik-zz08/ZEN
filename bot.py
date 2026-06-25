@@ -1281,19 +1281,42 @@ class UnoHandView(View):
 
         playable = game.get_playable_indices(player)
 
-        # Show each card as a button (max 25 buttons = 5 rows × 5)
-        for i, card in enumerate(player.hand[:25]):
+        # Show only playable cards as buttons (max 24 buttons to reserve 1 slot for Draw Card)
+        button_count = 0
+        for i, card in enumerate(player.hand):
             is_playable = i in playable and game.current_player == player
-            style = self._card_style(card) if is_playable else discord.ButtonStyle.secondary
-            btn = Button(
-                label=card.button_label,
-                style=style,
-                disabled=not is_playable,
-                custom_id=f"uno_card_{i}",
-                row=i // 5,
+            if is_playable:
+                if button_count >= 24:
+                    break
+                style = self._card_style(card)
+                btn = Button(
+                    label=card.button_label,
+                    style=style,
+                    disabled=False,
+                    custom_id=f"uno_card_{i}",
+                    row=button_count // 5,
+                )
+                btn.callback = self._make_card_cb(i, card)
+                self.add_item(btn)
+                button_count += 1
+
+        # Add Draw Card button directly if it's their turn
+        if game.current_player == player:
+            btn_draw = Button(
+                label="Draw Card",
+                style=discord.ButtonStyle.secondary,
+                emoji="📥",
+                custom_id="uno_hand_draw",
+                row=4,
             )
-            btn.callback = self._make_card_cb(i, card)
-            self.add_item(btn)
+            async def draw_callback(inter: discord.Interaction):
+                if self.played:
+                    await inter.response.send_message("You already played/drew a card!", ephemeral=True)
+                    return
+                self.played = True
+                await _uno_handle_draw(inter, self.game, self.player)
+            btn_draw.callback = draw_callback
+            self.add_item(btn_draw)
 
     def _card_style(self, card: UnoCard) -> discord.ButtonStyle:
         if card.color == "Red":
@@ -1310,7 +1333,7 @@ class UnoHandView(View):
     def _make_card_cb(self, index: int, card: UnoCard):
         async def callback(interaction: discord.Interaction):
             if self.played:
-                await interaction.response.send_message("You already played a card!", ephemeral=True)
+                await interaction.response.send_message("You already played/drew a card!", ephemeral=True)
                 return
             if self.game.current_player != self.player:
                 await interaction.response.send_message("It's not your turn!", ephemeral=True)
@@ -1428,13 +1451,14 @@ async def _uno_update_game(game: UnoGame):
         try:
             old_embed = game.build_game_embed()
             old_embed.set_footer(text="⬇️ See below for the latest turn.")
-            await game.message.edit(embed=old_embed, view=None)
+            await game.message.edit(content="✅ Turn complete.", embed=old_embed, view=None)
         except Exception:
             pass
     # Send a brand-new message with buttons at the bottom of chat
     embed = game.build_game_embed()
     view = UnoGameView(game)
-    game.message = await game.channel.send(embed=embed, view=view)
+    content = f"🔴 It's your turn, {game.current_player.user.mention}!"
+    game.message = await game.channel.send(content=content, embed=embed, view=view)
 
 
 async def _uno_end_game(game: UnoGame):
@@ -1459,6 +1483,125 @@ async def _uno_end_game(game: UnoGame):
 
     # Clean up
     _active_uno.pop(game.channel.id, None)
+
+
+class UnoDrawPlayView(View):
+    """Ephemeral view for deciding whether to play the card just drawn."""
+
+    def __init__(self, game: UnoGame, player: UnoPlayer, card: UnoCard):
+        super().__init__(timeout=None)
+        self.game = game
+        self.player = player
+        self.card = card
+        self.resolved = False
+
+    @discord.ui.button(label="Play Drawn Card", style=discord.ButtonStyle.success)
+    async def play_drawn(self, interaction: discord.Interaction, button: Button):
+        if self.resolved:
+            return
+        if self.game.current_player != self.player:
+            await interaction.response.send_message("It's not your turn!", ephemeral=True)
+            return
+        self.resolved = True
+        
+        # Disable buttons
+        for child in self.children:
+            child.disabled = True
+
+        # Play the card
+        try:
+            card_index = self.player.hand.index(self.card)
+        except ValueError:
+            await interaction.response.send_message("Could not find the drawn card in your hand.", ephemeral=True)
+            return
+
+        if self.card.color == "Wild":
+            # Show color picker
+            picker = UnoColorPickerView(self.game, card_index, self.player)
+            await interaction.response.edit_message(
+                content="🌈 Pick a color for your Wild card:", view=picker)
+            await picker.wait()
+            chosen_color = picker.chosen or "Red"
+            try:
+                actual_index = self.player.hand.index(self.card)
+            except ValueError:
+                return
+            played_card = self.game.play_card(self.player, actual_index, chosen_color)
+        else:
+            played_card = self.game.play_card(self.player, card_index)
+            await interaction.response.edit_message(
+                content=f"✅ You played: {played_card.display}", view=self)
+
+        await _uno_process_played_card(self.game, self.player, played_card)
+
+    @discord.ui.button(label="Keep Card & Pass", style=discord.ButtonStyle.secondary)
+    async def keep_card(self, interaction: discord.Interaction, button: Button):
+        if self.resolved:
+            return
+        if self.game.current_player != self.player:
+            await interaction.response.send_message("It's not your turn!", ephemeral=True)
+            return
+        self.resolved = True
+        
+        for child in self.children:
+            child.disabled = True
+        await interaction.response.edit_message(content="📥 You kept the card. Turn passed.", view=self)
+        
+        self.game.advance_turn()
+        await _uno_update_game(self.game)
+
+    async def on_timeout(self):
+        pass
+
+
+async def _uno_handle_draw(interaction: discord.Interaction, game: UnoGame, player: UnoPlayer):
+    if game.current_player != player:
+        await interaction.response.send_message("It's not your turn!", ephemeral=True)
+        return
+
+    drawn = game.draw_cards(player, 1)
+    drawn_card = drawn[0]
+
+    # Check if the drawn card is playable
+    if game.can_play(drawn_card):
+        # Notify the channel
+        await game.channel.send(
+            embed=discord.Embed(
+                description=f"📥 **{player.user.display_name}** drew a card and is deciding whether to play it...",
+                color=0x95A5A6))
+        
+        draw_play_view = UnoDrawPlayView(game, player, drawn_card)
+        if interaction.response.is_done():
+            await interaction.response.edit_message(
+                content=f"📥 You drew: {drawn_card.display}.\nYou can play it immediately or keep it in your hand.",
+                view=draw_play_view
+            )
+        else:
+            await interaction.response.send_message(
+                content=f"📥 You drew: {drawn_card.display}.\nYou can play it immediately or keep it in your hand.",
+                view=draw_play_view,
+                ephemeral=True
+            )
+    else:
+        # Not playable, notify channel and advance turn
+        await game.channel.send(
+            embed=discord.Embed(
+                description=f"📥 **{player.user.display_name}** drew a card. ({len(player.hand)} cards)",
+                color=0x95A5A6))
+
+        if interaction.response.is_done():
+            await interaction.response.edit_message(
+                content=f"📥 You drew: {drawn_card.display} (not playable). Your turn ends.",
+                view=None
+            )
+        else:
+            await interaction.response.send_message(
+                content=f"📥 You drew: {drawn_card.display} (not playable). Your turn ends.",
+                ephemeral=True
+            )
+
+        game.advance_turn()
+        await _uno_update_game(game)
 
 
 class UnoGameView(View):
@@ -1507,21 +1650,7 @@ class UnoGameView(View):
         if self.game.current_player != player:
             await interaction.response.send_message("It's not your turn!", ephemeral=True)
             return
-
-        drawn = self.game.draw_cards(player, 1)
-        drawn_card = drawn[0]
-
-        await interaction.response.send_message(
-            f"📥 You drew: {drawn_card.display}", ephemeral=True)
-
-        await self.game.channel.send(
-            embed=discord.Embed(
-                description=f"📥 **{player.user.display_name}** drew a card. ({len(player.hand)} cards)",
-                color=0x95A5A6))
-
-        # Advance turn
-        self.game.advance_turn()
-        await _uno_update_game(self.game)
+        await _uno_handle_draw(interaction, self.game, player)
 
     @discord.ui.button(label="Call UNO!", style=discord.ButtonStyle.danger, emoji="🔔")
     async def call_uno(self, interaction: discord.Interaction, button: Button):
