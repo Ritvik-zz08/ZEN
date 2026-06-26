@@ -1956,7 +1956,8 @@ async def _load_atlas_data():
         "andaman and nicobar islands", "chandigarh", "dadra and nagar haveli and daman and diu", "delhi", "jammu and kashmir", "ladakh", "lakshadweep", "puducherry",
         "alberta", "british columbia", "manitoba", "new brunswick", "newfoundland and labrador", "nova scotia", "ontario", "prince edward island", "quebec", "saskatchewan", "northwest territories", "nunavut", "yukon",
         "new south wales", "victoria", "queensland", "western australia", "south australia", "tasmania", "australian capital territory", "northern territory",
-        "england", "scotland", "wales", "northern ireland", "greenland", "puerto rico", "guam", "american samoa", "hong kong", "macau", "bermuda", "cayman islands", "falkland islands", "gibraltar"
+        "england", "scotland", "wales", "northern ireland", "greenland", "puerto rico", "guam", "american samoa", "hong kong", "macau", "bermuda", "cayman islands", "falkland islands", "gibraltar",
+        "asia", "africa", "north america", "south america", "antarctica", "europe", "australia", "oceania"
     ]
     places.update(base_places)
     
@@ -2122,7 +2123,11 @@ class AtlasLobbyView(View):
             return
 
         # Ensure dataset is loaded
-        asyncio.create_task(_load_atlas_data())
+        if len(ATLAS_PLACES) < 1000:
+            await interaction.response.send_message("Loading massive world database (169,000 cities)... This only takes a few seconds the very first time!", ephemeral=True)
+            await _load_atlas_data()
+        else:
+            await interaction.response.defer()
 
         self.game.start()
         for child in self.children:
@@ -2132,7 +2137,7 @@ class AtlasLobbyView(View):
             title="🌍 ATLAS — Game Started!",
             description=f"**{len(self.game.players)} players** are in. Let's go!",
             color=0x2ECC71)
-        await interaction.response.edit_message(embed=lobby_embed, view=self)
+        await interaction.message.edit(embed=lobby_embed, view=self)
 
         await _atlas_send_turn(self.game)
 
@@ -2253,27 +2258,21 @@ async def on_message(message: discord.Message):
             
             # They typed a regular message but not a command prefix
             if not content.startswith(config["prefix"]):
-                if game.turn_task and not game.turn_task.done():
-                    game.turn_task.cancel()
-                    
                 if content == "pass":
+                    if game.turn_task and not game.turn_task.done():
+                        game.turn_task.cancel()
                     game.deduct_life(player)
                     msg = f"⏭️ {player.user.display_name} passed and lost 1 life."
                     if player.lives <= 0:
                         msg += f" **They have been eliminated!**"
                     game.advance_turn()
                     await _atlas_send_turn(game, msg)
+                    return
                 else:
                     valid, err = game.validate_answer(content)
-                    if not valid:
-                        # Failed validation -> lost life
-                        game.deduct_life(player)
-                        msg = f"❌ Invalid answer! {err}\n{player.user.display_name} lost 1 life."
-                        if player.lives <= 0:
-                            msg += f" **They have been eliminated!**"
-                        game.advance_turn()
-                        await _atlas_send_turn(game, msg)
-                    else:
+                    if valid:
+                        if game.turn_task and not game.turn_task.done():
+                            game.turn_task.cancel()
                         # Success
                         game.used_names.add(content)
                         # Set next letter (find last valid alphanumeric character)
@@ -2283,9 +2282,15 @@ async def on_message(message: discord.Message):
                         
                         game.advance_turn()
                         await _atlas_send_turn(game, f"✅ **{content.title()}** accepted!")
-                
-                # Consume the message so it's not processed as a command if it accidentally matched
-                return 
+                        return
+                    else:
+                        # Invalid answer -> DO NOT cancel timer, DO NOT deduct life.
+                        # Just react with ❌ so they know it was rejected, and let them try again.
+                        try:
+                            await message.add_reaction("❌")
+                        except discord.HTTPException:
+                            pass
+                        return # Stop processing so it doesn't run as a command
 
     # Continue processing commands normally
     await bot.process_commands(message)
