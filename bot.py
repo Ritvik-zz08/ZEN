@@ -1973,21 +1973,20 @@ class AtlasPlayer:
         return "❤️" * self.lives
 
 
+@dataclass
 class AtlasGame:
-    """Core Atlas game state machine."""
-    
-    def __init__(self, host: discord.User | discord.Member, channel: discord.TextChannel):
-        self.host = host
-        self.channel = channel
-        self.players: list[AtlasPlayer] = []
-        self.current_index: int = 0
-        self.current_letter: str = "s"
-        self.used_names: set[str] = set()
-        self.started: bool = False
-        self.finished: bool = False
-        self.turn_task: asyncio.Task | None = None
-        self.lobby_message: discord.Message | None = None
-        self.game_message: discord.Message | None = None
+    host: discord.Member
+    channel: discord.TextChannel
+    players: list[AtlasPlayer] = field(default_factory=list)
+    started: bool = False
+    finished: bool = False
+    current_index: int = 0
+    current_letter: str = ""
+    previous_word: str = "ATLAS"
+    used_names: set[str] = field(default_factory=set)
+    lobby_message: discord.Message = None
+    game_message: discord.Message = None
+    turn_task: asyncio.Task = None
 
     @property
     def current_player(self) -> AtlasPlayer:
@@ -2007,7 +2006,9 @@ class AtlasGame:
 
     def start(self):
         self.started = True
+        self.current_index = 0
         self.current_letter = "s" # Starts with ATLAS -> S
+        self.previous_word = "ATLAS"
         self.used_names.clear()
 
     def advance_turn(self):
@@ -2178,7 +2179,7 @@ async def _atlas_send_turn(game: AtlasGame, error_msg: str = ""):
     if error_msg:
         desc.append(f"❌ {error_msg}\n")
         
-    desc.append(f"**Previous word:** `ATLAS`" if not game.used_names else f"**Previous word:** `{list(game.used_names)[-1].title()}`")
+    desc.append(f"**Previous word:** `{game.previous_word}`")
     desc.append(f"**Your letter:**  __**{game.current_letter.upper()}**__")
     desc.append(f"\nType a valid City/State/Country starting with **{game.current_letter.upper()}**.")
     desc.append(f"You have **30 seconds**. Type `pass` to skip and lose 1 life.")
@@ -2252,6 +2253,7 @@ async def on_message(message: discord.Message):
                             game.turn_task.cancel()
                         # Success
                         game.used_names.add(content)
+                        game.previous_word = content.title()
                         # Set next letter (find last valid alphanumeric character)
                         clean_content = "".join(c for c in content if c.isalpha())
                         if clean_content:
