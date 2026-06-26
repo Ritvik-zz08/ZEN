@@ -1908,80 +1908,22 @@ async def _load_atlas_data():
     import aiohttp
     import os
 
-    CITIES_PATH = os.path.join(DATA_DIR, "atlas_places.json")
+    CITIES_PATH = os.path.join(BASE_DIR, "assets", "atlas_places.json")
     
     if os.path.exists(CITIES_PATH):
         try:
             with open(CITIES_PATH, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 ATLAS_PLACES = set(data)
-                return
+                
+            # Make sure we add continents explicitly
+            continents = ["asia", "africa", "north america", "south america", "antarctica", "europe", "australia", "oceania"]
+            ATLAS_PLACES.update(continents)
+            return
         except Exception as e:
             print(f"[ATLAS] Error loading local cache: {e}")
 
-    print("[ATLAS] Downloading world cities and places database...")
-    places = set()
-    
-    # 1. Base list of countries and states
-    base_places = [
-        "afghanistan", "albania", "algeria", "andorra", "angola", "antigua and barbuda", "argentina", "armenia", "australia", "austria", "azerbaijan",
-        "bahamas", "bahrain", "bangladesh", "barbados", "belarus", "belgium", "belize", "benin", "bhutan", "bolivia", "bosnia and herzegovina", "botswana", "brazil", "brunei", "bulgaria", "burkina faso", "burundi",
-        "cabo verde", "cambodia", "cameroon", "canada", "central african republic", "chad", "chile", "china", "colombia", "comoros", "congo", "costa rica", "croatia", "cuba", "cyprus", "czechia", "czech republic",
-        "denmark", "djibouti", "dominica", "dominican republic",
-        "ecuador", "egypt", "el salvador", "equatorial guinea", "eritrea", "estonia", "eswatini", "ethiopia",
-        "fiji", "finland", "france",
-        "gabon", "gambia", "georgia", "germany", "ghana", "greece", "grenada", "guatemala", "guinea", "guinea-bissau", "guyana",
-        "haiti", "honduras", "hungary",
-        "iceland", "india", "indonesia", "iran", "iraq", "ireland", "israel", "italy", "ivory coast",
-        "jamaica", "japan", "jordan",
-        "kazakhstan", "kenya", "kiribati", "kosovo", "kuwait", "kyrgyzstan",
-        "laos", "latvia", "lebanon", "lesotho", "liberia", "libya", "liechtenstein", "lithuania", "luxembourg",
-        "madagascar", "malawi", "malaysia", "maldives", "mali", "malta", "marshall islands", "mauritania", "mauritius", "mexico", "micronesia", "moldova", "monaco", "mongolia", "montenegro", "morocco", "mozambique", "myanmar",
-        "namibia", "nauru", "nepal", "netherlands", "new zealand", "nicaragua", "niger", "nigeria", "north korea", "north macedonia", "norway",
-        "oman",
-        "pakistan", "palau", "palestine", "panama", "papua new guinea", "paraguay", "peru", "philippines", "poland", "portugal",
-        "qatar",
-        "romania", "russia", "rwanda",
-        "saint kitts and nevis", "saint lucia", "saint vincent and the grenadines", "samoa", "san marino", "sao tome and principe", "saudi arabia", "senegal", "serbia", "seychelles", "sierra leone", "singapore", "slovakia", "slovenia", "solomon islands", "somalia", "south africa", "south korea", "south sudan", "spain", "sri lanka", "sudan", "suriname", "sweden", "switzerland", "syria",
-        "taiwan", "tajikistan", "tanzania", "thailand", "timor-leste", "togo", "tonga", "trinidad and tobago", "tunisia", "turkey", "turkmenistan", "tuvalu",
-        "uganda", "ukraine", "united arab emirates", "united kingdom", "united states", "united states of america", "uruguay", "uzbekistan",
-        "vanuatu", "vatican city", "venezuela", "vietnam",
-        "yemen", "zambia", "zimbabwe",
-        "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida", "georgia",
-        "hawaii", "idaho", "illinois", "indiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland",
-        "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey",
-        "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina",
-        "south dakota", "tennessee", "texas", "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming",
-        "andhra pradesh", "arunachal pradesh", "assam", "bihar", "chhattisgarh", "goa", "gujarat", "haryana", "himachal pradesh", "jharkhand", "karnataka", "kerala", "madhya pradesh", "maharashtra", "manipur", "meghalaya", "mizoram", "nagaland", "odisha", "punjab", "rajasthan", "sikkim", "tamil nadu", "telangana", "tripura", "uttar pradesh", "uttarakhand", "west bengal",
-        "andaman and nicobar islands", "chandigarh", "dadra and nagar haveli and daman and diu", "delhi", "jammu and kashmir", "ladakh", "lakshadweep", "puducherry",
-        "alberta", "british columbia", "manitoba", "new brunswick", "newfoundland and labrador", "nova scotia", "ontario", "prince edward island", "quebec", "saskatchewan", "northwest territories", "nunavut", "yukon",
-        "new south wales", "victoria", "queensland", "western australia", "south australia", "tasmania", "australian capital territory", "northern territory",
-        "england", "scotland", "wales", "northern ireland", "greenland", "puerto rico", "guam", "american samoa", "hong kong", "macau", "bermuda", "cayman islands", "falkland islands", "gibraltar",
-        "asia", "africa", "north america", "south america", "antarctica", "europe", "australia", "oceania"
-    ]
-    places.update(base_places)
-    
-    # 2. Fetch a large world cities list (~40k cities)
-    try:
-        url = "https://raw.githubusercontent.com/lutangar/cities.json/master/cities.json"
-        async with aiohttp.ClientSession() as session:
-            async with session.get(url, timeout=15) as resp:
-                if resp.status == 200:
-                    cities_data = await resp.json()
-                    for item in cities_data:
-                        places.add(item.get("name", "").strip().lower())
-        print(f"[ATLAS] Successfully loaded {len(places)} places.")
-    except Exception as e:
-        print(f"[ATLAS] Failed to fetch cities database: {e}. Falling back to base dataset.")
-        
-    ATLAS_PLACES = places
-    # Cache to file
-    try:
-        os.makedirs(os.path.dirname(CITIES_PATH), exist_ok=True)
-        with open(CITIES_PATH, "w", encoding="utf-8") as f:
-            json.dump(list(ATLAS_PLACES), f)
-    except Exception as e:
-        print(f"[ATLAS] Failed to save cache: {e}")
+    print("[ATLAS] ERROR: assets/atlas_places.json not found!")
 
 
 @dataclass
