@@ -307,6 +307,53 @@ def get_user_stats(user_id: int) -> dict:
         return data.get(uid, default)
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+#  LEVELING SYSTEM HELPERS
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def get_user_level(user_id: int) -> dict:
+    """Get a user's XP and Level data."""
+    uid = str(user_id)
+    default = {"xp": 0, "level": 0}
+    if db is not None:
+        doc = db.levels.find_one({"_id": uid})
+        if doc:
+            return {"xp": doc.get("xp", 0), "level": doc.get("level", 0)}
+        return default
+    return default
+
+
+def add_user_xp(user_id: int, xp_amount: int) -> dict:
+    """Add XP to a user and return their new data."""
+    uid = str(user_id)
+    current = get_user_level(user_id)
+    new_xp = current["xp"] + xp_amount
+    new_level = int((new_xp / 100) ** 0.5)
+    
+    data = {"xp": new_xp, "level": new_level}
+    if db is not None:
+        db.levels.update_one({"_id": uid}, {"$set": data}, upsert=True)
+    return data
+
+
+def get_guild_level_channel(guild_id: int) -> int:
+    """Get the configured level-up channel for a guild."""
+    if db is not None:
+        doc = db.guilds.find_one({"_id": str(guild_id)})
+        if doc:
+            return doc.get("level_channel", 0)
+    return 0
+
+
+def set_guild_level_channel(guild_id: int, channel_id: int) -> None:
+    """Set the configured level-up channel for a guild."""
+    if db is not None:
+        db.guilds.update_one(
+            {"_id": str(guild_id)}, 
+            {"$set": {"level_channel": channel_id}}, 
+            upsert=True
+        )
+
 # ── Shop: Color Roles ─────────────────────────────────────────────────────────
 
 SHOP_PATH = os.path.join(DATA_DIR, "shop.json")
@@ -653,6 +700,17 @@ async def profile(ctx: commands.Context, member: discord.Member = None):
 
     embed = discord.Embed(title=f"{target.display_name}'s Profile", color=Colors.PROFILE)
     embed.set_thumbnail(url=target.display_avatar.url)
+    
+    level_data = get_user_level(target.id)
+    lvl = level_data["level"]
+    xp = level_data["xp"]
+    base_xp = 100 * (lvl ** 2)
+    next_xp = 100 * ((lvl + 1) ** 2)
+    progress = (xp - base_xp) / (next_xp - base_xp) if next_xp > base_xp else 0
+    filled = int(progress * 10)
+    bar = "█" * filled + "░" * (10 - filled)
+    
+    embed.add_field(name="⭐ Level", value=f"**{lvl}** ({xp:,}/{next_xp:,} XP)\n`{bar}`", inline=False)
     embed.add_field(name="💰 Balance", value=f"{coin(bal)} Coins", inline=True)
     embed.add_field(name="🔥 Daily Streak", value=f"{streak} days", inline=True)
     
@@ -2861,6 +2919,8 @@ async def _atlas_turn_timer(game: AtlasGame, player: AtlasPlayer):
     except asyncio.CancelledError:
         pass # Task cancelled because player responded in time
 
+_xp_cooldowns: dict[int, float] = {}
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot:
@@ -2914,6 +2974,45 @@ async def on_message(message: discord.Message):
 
     if await handle_multiplayer_message(message, config["prefix"]):
         return
+
+    # Leveling XP system
+    if not message.content.startswith(config["prefix"]):
+        now = time.time()
+        last_xp = _xp_cooldowns.get(message.author.id, 0)
+        if now - last_xp >= 60: # 60 second cooldown
+            _xp_cooldowns[message.author.id] = now
+            
+            old_data = get_user_level(message.author.id)
+            old_level = old_data["level"]
+            
+            xp_amount = random.randint(15, 25)
+            new_data = add_user_xp(message.author.id, xp_amount)
+            new_level = new_data["level"]
+            
+            if new_level > old_level:
+                channel_id = get_guild_level_channel(message.guild.id) if message.guild else 0
+                if channel_id:
+                    lvl_chan = message.guild.get_channel(channel_id)
+                    if lvl_chan:
+                        embed = discord.Embed(
+                            title="🎉 Level Up!",
+                            description=f"Congratulations {message.author.mention}, you reached **Level {new_level}**!",
+                            color=0xFFD700
+                        )
+                        embed.set_thumbnail(url=message.author.display_avatar.url)
+                        try:
+                            await lvl_chan.send(embed=embed)
+                        except discord.Forbidden:
+                            pass
+                
+                if new_level % 10 == 0 and new_level <= 100 and message.guild:
+                    role_name = f"Level {new_level}"
+                    role = discord.utils.get(message.guild.roles, name=role_name)
+                    if role:
+                        try:
+                            await message.author.add_roles(role)
+                        except discord.Forbidden:
+                            pass
 
     # Continue processing commands normally
     await bot.process_commands(message)
@@ -3191,6 +3290,60 @@ async def ai_chat(ctx: commands.Context, *, prompt: str = None):
             logging.error(f"AI command error: {e}")
             await ctx.reply(embed=discord.Embed(
                 description=f"❌ **An error occurred:** {str(e)}", color=0xFF4444))
+
+@bot.command(name="rank", aliases=["level"])
+async def rank(ctx: commands.Context, member: discord.Member = None):
+    """View your current chat level and XP."""
+    target = member or ctx.author
+    level_data = get_user_level(target.id)
+    lvl = level_data["level"]
+    xp = level_data["xp"]
+    base_xp = 100 * (lvl ** 2)
+    next_xp = 100 * ((lvl + 1) ** 2)
+    progress = (xp - base_xp) / (next_xp - base_xp) if next_xp > base_xp else 0
+    filled = int(progress * 10)
+    bar = "█" * filled + "░" * (10 - filled)
+
+    embed = discord.Embed(title=f"📈 {target.display_name}'s Rank", color=0x3498DB)
+    embed.set_thumbnail(url=target.display_avatar.url)
+    embed.description = f"**Level {lvl}**\n`{bar}`\n{xp:,} / {next_xp:,} XP"
+    await ctx.send(embed=embed)
+
+
+@bot.command(name="setlevelchannel")
+@commands.has_permissions(administrator=True)
+async def setlevelchannel(ctx: commands.Context, channel: discord.TextChannel):
+    """Admin only: Set the channel where level up messages are sent."""
+    set_guild_level_channel(ctx.guild.id, channel.id)
+    await ctx.send(f"✅ Level up messages will now be sent in {channel.mention}.")
+
+
+@bot.command(name="setuproles")
+@commands.has_permissions(administrator=True)
+async def setuproles(ctx: commands.Context):
+    """Admin only: Automatically create milestone roles (Level 10 - Level 100)."""
+    await ctx.send("⏳ Creating roles... this might take a moment.")
+    created = []
+    # Gradient of colors for levels
+    colors = [0x1abc9c, 0x2ecc71, 0x3498db, 0x9b59b6, 0xe91e63, 0xf1c40f, 0xe67e22, 0xe74c3c, 0x34495e, 0x000000]
+    
+    for i in range(1, 11):
+        lvl = i * 10
+        role_name = f"Level {lvl}"
+        existing = discord.utils.get(ctx.guild.roles, name=role_name)
+        if not existing:
+            try:
+                await ctx.guild.create_role(name=role_name, color=colors[i-1], hoist=True, reason="ZEN Leveling System Setup")
+                created.append(role_name)
+            except discord.Forbidden:
+                await ctx.send("❌ I don't have permission to create roles (Manage Roles).")
+                return
+    
+    if created:
+        await ctx.send(f"✅ Created {len(created)} roles: " + ", ".join(created))
+    else:
+        await ctx.send("✅ All milestone roles already exist!")
+
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
