@@ -3169,6 +3169,38 @@ async def ai_chat(ctx: commands.Context, *, prompt: str = None):
             await ctx.reply(embed=discord.Embed(
                 description=f"❌ **An error occurred:** {str(e)}", color=0xFF4444))
 
+@bot.command(name="addcoins", aliases=["spawn"])
+@commands.is_owner()
+async def admin_addcoins(ctx: commands.Context, member: discord.Member, amount: int):
+    """Admin only: Spawn coins for a user."""
+    if amount <= 0:
+        await ctx.send("❌ Amount must be positive.")
+        return
+    new_bal = add_balance(member.id, amount, STARTING)
+    await ctx.send(f"✅ Gave {coin(amount)} to **{member.display_name}**. New balance: {coin(new_bal)}")
+
+
+@bot.command(name="removecoins")
+@commands.is_owner()
+async def admin_removecoins(ctx: commands.Context, member: discord.Member, amount: int):
+    """Admin only: Remove coins from a user."""
+    if amount <= 0:
+        await ctx.send("❌ Amount must be positive.")
+        return
+    new_bal = add_balance(member.id, -amount, STARTING)
+    await ctx.send(f"✅ Removed {coin(amount)} from **{member.display_name}**. New balance: {coin(new_bal)}")
+
+
+@bot.command(name="setcoins")
+@commands.is_owner()
+async def admin_setcoins(ctx: commands.Context, member: discord.Member, amount: int):
+    """Admin only: Set a user's exact balance."""
+    if amount < 0:
+        await ctx.send("❌ Amount cannot be negative.")
+        return
+    new_bal = set_balance(member.id, amount)
+    await ctx.send(f"✅ Set **{member.display_name}**'s balance to {coin(new_bal)}.")
+
 
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
