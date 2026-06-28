@@ -2926,6 +2926,45 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
+    # Leveling XP system (runs BEFORE game handlers so XP is always granted)
+    if message.guild and not message.content.startswith(config["prefix"]):
+        now = time.time()
+        last_xp = _xp_cooldowns.get(message.author.id, 0)
+        if now - last_xp >= 60: # 60 second cooldown
+            _xp_cooldowns[message.author.id] = now
+            
+            old_data = get_user_level(message.author.id)
+            old_level = old_data["level"]
+            
+            xp_amount = random.randint(15, 25)
+            new_data = add_user_xp(message.author.id, xp_amount)
+            new_level = new_data["level"]
+            
+            if new_level > old_level:
+                channel_id = get_guild_level_channel(message.guild.id)
+                if channel_id:
+                    lvl_chan = message.guild.get_channel(channel_id)
+                    if lvl_chan:
+                        embed = discord.Embed(
+                            title="🎉 Level Up!",
+                            description=f"Congratulations **{message.author.display_name}**, you reached **Level {new_level}**!",
+                            color=0xFFD700
+                        )
+                        embed.set_thumbnail(url=message.author.display_avatar.url)
+                        try:
+                            await lvl_chan.send(embed=embed)
+                        except discord.Forbidden:
+                            pass
+                
+                if new_level % 10 == 0 and new_level <= 100:
+                    role_name = f"Level {new_level}"
+                    role = discord.utils.get(message.guild.roles, name=role_name)
+                    if role:
+                        try:
+                            await message.author.add_roles(role)
+                        except discord.Forbidden:
+                            pass
+
     # Check for active Atlas game in this channel
     game = _active_atlas.get(message.channel.id)
     if game and game.started and not game.finished:
@@ -2974,45 +3013,6 @@ async def on_message(message: discord.Message):
 
     if await handle_multiplayer_message(message, config["prefix"]):
         return
-
-    # Leveling XP system
-    if not message.content.startswith(config["prefix"]):
-        now = time.time()
-        last_xp = _xp_cooldowns.get(message.author.id, 0)
-        if now - last_xp >= 60: # 60 second cooldown
-            _xp_cooldowns[message.author.id] = now
-            
-            old_data = get_user_level(message.author.id)
-            old_level = old_data["level"]
-            
-            xp_amount = random.randint(15, 25)
-            new_data = add_user_xp(message.author.id, xp_amount)
-            new_level = new_data["level"]
-            
-            if new_level > old_level:
-                channel_id = get_guild_level_channel(message.guild.id) if message.guild else 0
-                if channel_id:
-                    lvl_chan = message.guild.get_channel(channel_id)
-                    if lvl_chan:
-                        embed = discord.Embed(
-                            title="🎉 Level Up!",
-                            description=f"Congratulations **{message.author.display_name}**, you reached **Level {new_level}**!",
-                            color=0xFFD700
-                        )
-                        embed.set_thumbnail(url=message.author.display_avatar.url)
-                        try:
-                            await lvl_chan.send(embed=embed)
-                        except discord.Forbidden:
-                            pass
-                
-                if new_level % 10 == 0 and new_level <= 100 and message.guild:
-                    role_name = f"Level {new_level}"
-                    role = discord.utils.get(message.guild.roles, name=role_name)
-                    if role:
-                        try:
-                            await message.author.add_roles(role)
-                        except discord.Forbidden:
-                            pass
 
     # Continue processing commands normally
     await bot.process_commands(message)
@@ -3205,6 +3205,7 @@ async def on_ready():
     print(f"[OK] Logged in as {bot.user} (ID: {bot.user.id})")
     print(f"[*]  Prefix: {config['prefix']}")
     print(f"[*]  Owner ID: {config['owner_id']}")
+    print(f"[*]  Database: {'MongoDB Connected' if db is not None else 'LOCAL JSON (No MONGO_URI)'}")
     print(f"[*]  Connected to {len(bot.guilds)} guild(s)")
     await bot.change_presence(
         activity=discord.Activity(
