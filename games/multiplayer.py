@@ -658,6 +658,7 @@ class WolfNightKillView(View):
             await interaction.response.send_message(
                 f"🐺 You voted to eliminate **{target.user.display_name}**.", ephemeral=True)
             if all(w.night_vote for w in self.game.wolves):
+                self.stop()
                 if self.game.phase_task and not self.game.phase_task.done():
                     self.game.phase_task.cancel()
                 await _wolf_resolve_night(self.game)
@@ -709,6 +710,7 @@ class WolfDayVoteView(View):
             await interaction.response.send_message(
                 f"🗳️ You voted for **{target.user.display_name}**.", ephemeral=True)
             if all(p.day_vote for p in self.game.alive):
+                self.stop()
                 if self.game.phase_task and not self.game.phase_task.done():
                     self.game.phase_task.cancel()
                 await _wolf_resolve_day(self.game)
@@ -773,18 +775,8 @@ async def _wolf_start_night(game: WerewolfGame):
         except discord.Forbidden:
             pass
 
-    if game.phase_task and not game.phase_task.done():
-        game.phase_task.cancel()
-    game.phase_task = asyncio.create_task(_wolf_night_timer(game))
 
 
-async def _wolf_night_timer(game: WerewolfGame):
-    try:
-        await asyncio.sleep(46)
-        if game.channel.id in _active_wolf and game.phase == "night":
-            await _wolf_resolve_night(game)
-    except asyncio.CancelledError:
-        pass
 
 
 async def _wolf_resolve_night(game: WerewolfGame):
@@ -831,18 +823,9 @@ async def _wolf_start_day(game: WerewolfGame):
     )
     view = WolfDayVoteView(game)
     game.phase_msg = await game.channel.send(embed=embed, view=view)
-    if game.phase_task and not game.phase_task.done():
-        game.phase_task.cancel()
-    game.phase_task = asyncio.create_task(_wolf_day_timer(game))
 
 
-async def _wolf_day_timer(game: WerewolfGame):
-    try:
-        await asyncio.sleep(61)
-        if game.channel.id in _active_wolf and game.phase == "day":
-            await _wolf_resolve_day(game)
-    except asyncio.CancelledError:
-        pass
+
 
 
 async def _wolf_resolve_day(game: WerewolfGame):
