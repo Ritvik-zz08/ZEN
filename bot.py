@@ -2996,7 +2996,7 @@ async def on_message(message: discord.Message):
                     if lvl_chan:
                         embed = discord.Embed(
                             title="🎉 Level Up!",
-                            description=f"Congratulations {message.author.mention}, you reached **Level {new_level}**!",
+                            description=f"Congratulations **{message.author.display_name}**, you reached **Level {new_level}**!",
                             color=0xFFD700
                         )
                         embed.set_thumbnail(url=message.author.display_avatar.url)
