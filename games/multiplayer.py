@@ -60,8 +60,36 @@ class BaseLobbyView(View):
     rules_text = ""
 
     def __init__(self, game):
-        super().__init__(timeout=None)
+        super().__init__(timeout=300)  # Lobby expires after 5 minutes
         self.game = game
+        self.lobby_message: Optional[discord.Message] = None
+
+    async def on_timeout(self):
+        if not self.game.started:
+            # Refund fees and clean up
+            fee = getattr(self.game, "entry_fee", 0)
+            if fee > 0:
+                for p in self.game.players:
+                    self.game.add_bal(p.user.id, fee)
+            # Clean up channel lock
+            _unlock_channel(self.game.channel.id)
+            # Remove from active game dicts
+            for registry in [_active_trivia, _active_rps, _active_wolf, _active_guess]:
+                registry.pop(self.game.channel.id, None)
+            for child in self.children:
+                child.disabled = True
+            if self.lobby_message:
+                try:
+                    await self.lobby_message.edit(
+                        embed=discord.Embed(
+                            title=f"{self.game_label} — Expired",
+                            description="Lobby timed out (5 minutes). Fees refunded.",
+                            color=0xFFA500,
+                        ),
+                        view=self,
+                    )
+                except discord.HTTPException:
+                    pass
 
     def player_lines(self) -> str:
         return "\n".join(f"✅ {p.user.display_name}" for p in self.game.players)
@@ -211,6 +239,7 @@ class TriviaRoundView(View):
     def __init__(self, game: TriviaGame, q: dict):
         super().__init__(timeout=TRIVIA_TIMER)
         self.game = game
+        self._round_resolved = False
         self.q = q
         labels = ["A", "B", "C", "D"]
         for i, opt in enumerate(q["options"]):
@@ -241,7 +270,8 @@ class TriviaRoundView(View):
         return cb
 
     async def on_timeout(self):
-        if self.game.channel.id in _active_trivia:
+        if self.game.channel.id in _active_trivia and not self._round_resolved:
+            self._round_resolved = True
             await _trivia_end_round(self.game)
 
 
@@ -276,7 +306,7 @@ async def _trivia_round_timer(game: TriviaGame):
 
 
 async def _trivia_end_round(game: TriviaGame):
-    if game.finished:
+    if game.finished or game.round_index >= len(game.questions):
         return
     game.round_index += 1
     if game.round_msg:
@@ -381,6 +411,7 @@ class RPSRoundView(View):
     def __init__(self, game: RPSGame):
         super().__init__(timeout=RPS_TIMER)
         self.game = game
+        self._round_resolved = False
         for move, emoji in RPS_EMOJI.items():
             btn = Button(label=move.title(), emoji=emoji, style=discord.ButtonStyle.primary)
             btn.callback = self._make_cb(move)
@@ -405,7 +436,8 @@ class RPSRoundView(View):
         return cb
 
     async def on_timeout(self):
-        if self.game.channel.id in _active_rps:
+        if self.game.channel.id in _active_rps and not self._round_resolved:
+            self._round_resolved = True
             await _rps_resolve_round(self.game)
 
 
@@ -458,6 +490,10 @@ def _rps_eliminate_losers(alive: list[RPSPlayer], choices: dict[int, str]) -> li
 async def _rps_resolve_round(game: RPSGame):
     if game.finished:
         return
+    # Guard: prevent double-resolution from both view timeout and timer task
+    if hasattr(game, '_resolving_round') and game._resolving_round:
+        return
+    game._resolving_round = True
     if game.round_msg:
         try:
             await game.round_msg.edit(view=None)
@@ -481,6 +517,7 @@ async def _rps_resolve_round(game: RPSGame):
         await game.channel.send(embed=embed)
         game.round_num -= 1
         await asyncio.sleep(2)
+        game._resolving_round = False
         await _rps_send_round(game)
         return
 
@@ -494,6 +531,7 @@ async def _rps_resolve_round(game: RPSGame):
     )
     await game.channel.send(embed=embed)
     await asyncio.sleep(2)
+    game._resolving_round = False
     await _rps_send_round(game)
 
 
@@ -542,6 +580,7 @@ class WerewolfGame:
     phase: str = "lobby"  # night | day
     day_num: int = 0
     phase_msg: Optional[discord.Message] = None
+    _phase_resolving: bool = False
     phase_task: Optional[asyncio.Task] = None
 
     def add_player(self, user):
@@ -764,8 +803,9 @@ async def _wolf_night_timer(game: WerewolfGame):
 
 
 async def _wolf_resolve_night(game: WerewolfGame):
-    if game.phase != "night" or game.finished:
+    if game.phase != "night" or game.finished or game._phase_resolving:
         return
+    game._phase_resolving = True
     if game.phase_msg:
         try:
             await game.phase_msg.edit(view=None)
@@ -787,6 +827,7 @@ async def _wolf_resolve_night(game: WerewolfGame):
     else:
         msg = "🛡️ No one was killed tonight (wolves couldn't agree)."
     await game.channel.send(embed=discord.Embed(title="🌙 Night Ends", description=msg, color=0x1A1A2E))
+    game._phase_resolving = False
     if await _wolf_check_win(game):
         return
     await asyncio.sleep(2)
@@ -820,8 +861,9 @@ async def _wolf_day_timer(game: WerewolfGame):
 
 
 async def _wolf_resolve_day(game: WerewolfGame):
-    if game.phase != "day" or game.finished:
+    if game.phase != "day" or game.finished or game._phase_resolving:
         return
+    game._phase_resolving = True
     if game.phase_msg:
         try:
             await game.phase_msg.edit(view=None)
@@ -846,6 +888,7 @@ async def _wolf_resolve_day(game: WerewolfGame):
                 description=f"🗳️ **{target.user.display_name}** was voted out!",
                 color=0xE67E22,
             ))
+    game._phase_resolving = False
     if await _wolf_check_win(game):
         return
     await asyncio.sleep(2)
@@ -875,6 +918,7 @@ class GuessGame:
     finished: bool = False
     secret: int = 0
     guesses_left: int = GUESS_MAX
+    timeout_task: Optional[asyncio.Task] = None
 
     @property
     def pot(self) -> int:
@@ -898,6 +942,16 @@ class GuessGame:
         if self.entry_fee > 0:
             embed.set_footer(text=f"Prize pool: {self.pot:,} coins")
         await self.channel.send(embed=embed)
+        # Start a 3-minute timeout for the whole game
+        self.timeout_task = asyncio.create_task(self._game_timeout())
+
+    async def _game_timeout(self):
+        try:
+            await asyncio.sleep(180)  # 3 minutes
+            if not self.finished:
+                await _guess_end_no_winner(self)
+        except asyncio.CancelledError:
+            pass
 
 
 _active_guess: dict[int, GuessGame] = {}
@@ -932,6 +986,8 @@ async def handle_guess_message(message: discord.Message, cmd_prefix: str = "Z") 
     player.guesses += 1
     if num == game.secret:
         game.finished = True
+        if game.timeout_task and not game.timeout_task.done():
+            game.timeout_task.cancel()
         desc = f"🎉 **{message.author.display_name}** guessed **{game.secret}** in {player.guesses} tries!"
         if game.entry_fee > 0:
             game.add_bal(message.author.id, game.pot)
@@ -949,7 +1005,29 @@ async def handle_guess_message(message: discord.Message, cmd_prefix: str = "Z") 
     if player.guesses >= GUESS_MAX:
         await message.channel.send(
             f"❌ {message.author.mention} used all {GUESS_MAX} guesses!", delete_after=8)
+        # Check if ALL players have exhausted their guesses
+        if all(p.guesses >= GUESS_MAX for p in game.players):
+            await _guess_end_no_winner(game)
     return True
+
+
+async def _guess_end_no_winner(game: GuessGame):
+    """End a guess game with no winner — refund all entry fees."""
+    if game.finished:
+        return
+    game.finished = True
+    if game.timeout_task and not game.timeout_task.done():
+        game.timeout_task.cancel()
+    desc = f"Nobody guessed the number! It was **{game.secret}**."
+    if game.entry_fee > 0:
+        share = game.pot // len(game.players)
+        for p in game.players:
+            game.add_bal(p.user.id, share)
+        desc += f"\nEntry fees refunded ({game.coin_fmt(share)} each)."
+    await game.channel.send(embed=discord.Embed(
+        title="🔢 Number Guess — Game Over!", description=desc, color=0xE74C3C))
+    _active_guess.pop(game.channel.id, None)
+    _unlock_channel(game.channel.id)
 
 
 def _refund_guess(game: GuessGame):
@@ -1057,7 +1135,8 @@ def setup_multiplayer(bot: commands.Bot, *, config: dict, starting: int, get_bal
         _active_trivia[ctx.channel.id] = game
         _lock_channel(ctx.channel.id, "trivia")
         view = TriviaLobbyView(game)
-        await ctx.send(embed=view.build_embed(), view=view)
+        msg = await ctx.send(embed=view.build_embed(), view=view)
+        view.lobby_message = msg
 
     @bot.command(name="rps", aliases=["rpsroyale", "rockpaperscissors"])
     async def rps_cmd(ctx: commands.Context, entry_fee: int = 0):
@@ -1077,7 +1156,8 @@ def setup_multiplayer(bot: commands.Bot, *, config: dict, starting: int, get_bal
         _active_rps[ctx.channel.id] = game
         _lock_channel(ctx.channel.id, "rps")
         view = RPSLobbyView(game)
-        await ctx.send(embed=view.build_embed(), view=view)
+        msg = await ctx.send(embed=view.build_embed(), view=view)
+        view.lobby_message = msg
 
     @bot.command(name="werewolf", aliases=["wolf", "ww"])
     async def werewolf_cmd(ctx: commands.Context):
@@ -1093,7 +1173,8 @@ def setup_multiplayer(bot: commands.Bot, *, config: dict, starting: int, get_bal
         _active_wolf[ctx.channel.id] = game
         _lock_channel(ctx.channel.id, "wolf")
         view = WolfLobbyView(game)
-        await ctx.send(embed=view.build_embed(), view=view)
+        msg = await ctx.send(embed=view.build_embed(), view=view)
+        view.lobby_message = msg
 
     @bot.command(name="guess", aliases=["numberguess", "ng"])
     async def guess_cmd(ctx: commands.Context, entry_fee: int = 0):
@@ -1113,7 +1194,8 @@ def setup_multiplayer(bot: commands.Bot, *, config: dict, starting: int, get_bal
         _active_guess[ctx.channel.id] = game
         _lock_channel(ctx.channel.id, "guess")
         view = GuessLobbyView(game)
-        await ctx.send(embed=view.build_embed(), view=view)
+        msg = await ctx.send(embed=view.build_embed(), view=view)
+        view.lobby_message = msg
 
     return prefix
 
