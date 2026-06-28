@@ -21,6 +21,7 @@ import threading
 from dataclasses import dataclass, field
 from typing import Optional
 from google import genai
+import pymongo
 
 from games.multiplayer import (
     get_help_multiplayer,
@@ -71,6 +72,19 @@ def load_config() -> dict:
 
 config = load_config()
 
+MONGO_URI = os.environ.get("MONGO_URI")
+if MONGO_URI:
+    try:
+        mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        mongo_client.server_info()
+        db = mongo_client["zenbot"]
+        print("[!] Successfully connected to MongoDB.")
+    except Exception as e:
+        print(f"[!] Failed to connect to MongoDB: {e}")
+        db = None
+else:
+    db = None
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  JSON DATA LAYER
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -94,9 +108,16 @@ def _save_all(data: dict) -> None:
 
 
 def get_balance(user_id: int, starting: int = 500) -> int:
+    uid = str(user_id)
+    if db is not None:
+        doc = db.balances.find_one({"_id": uid})
+        if not doc:
+            db.balances.insert_one({"_id": uid, "bal": starting})
+            return starting
+        return doc.get("bal", starting)
+
     with _data_lock:
         data = _load_all()
-        uid = str(user_id)
         if uid not in data:
             data[uid] = starting
             _save_all(data)
@@ -104,17 +125,34 @@ def get_balance(user_id: int, starting: int = 500) -> int:
 
 
 def set_balance(user_id: int, amount: int) -> int:
+    uid = str(user_id)
+    new_bal = max(0, amount)
+    if db is not None:
+        db.balances.update_one({"_id": uid}, {"$set": {"bal": new_bal}}, upsert=True)
+        return new_bal
+
     with _data_lock:
         data = _load_all()
-        data[str(user_id)] = max(0, amount)
+        data[uid] = new_bal
         _save_all(data)
-        return data[str(user_id)]
+        return new_bal
 
 
 def add_balance(user_id: int, amount: int, starting: int = 500) -> int:
+    uid = str(user_id)
+    if db is not None:
+        doc = db.balances.find_one({"_id": uid})
+        if not doc:
+            db.balances.insert_one({"_id": uid, "bal": starting})
+            current = starting
+        else:
+            current = doc.get("bal", starting)
+        new = max(0, current + amount)
+        db.balances.update_one({"_id": uid}, {"$set": {"bal": new}})
+        return new
+
     with _data_lock:
         data = _load_all()
-        uid = str(user_id)
         current = data.get(uid, starting)
         new = max(0, current + amount)
         data[uid] = new
@@ -123,9 +161,20 @@ def add_balance(user_id: int, amount: int, starting: int = 500) -> int:
 
 
 def transfer(from_id: int, to_id: int, amount: int, starting: int = 500) -> tuple[int, int]:
+    f_uid, t_uid = str(from_id), str(to_id)
+    if db is not None:
+        f_doc = db.balances.find_one({"_id": f_uid}) or {"bal": starting}
+        t_doc = db.balances.find_one({"_id": t_uid}) or {"bal": starting}
+        from_bal, to_bal = f_doc.get("bal", starting), t_doc.get("bal", starting)
+        if from_bal < amount:
+            raise ValueError(f"Insufficient funds (have {from_bal:,}, need {amount:,}).")
+        
+        db.balances.update_one({"_id": f_uid}, {"$set": {"bal": from_bal - amount}}, upsert=True)
+        db.balances.update_one({"_id": t_uid}, {"$set": {"bal": to_bal + amount}}, upsert=True)
+        return from_bal - amount, to_bal + amount
+
     with _data_lock:
         data = _load_all()
-        f_uid, t_uid = str(from_id), str(to_id)
         from_bal = data.get(f_uid, starting)
         to_bal = data.get(t_uid, starting)
         if from_bal < amount:
@@ -137,6 +186,10 @@ def transfer(from_id: int, to_id: int, amount: int, starting: int = 500) -> tupl
 
 
 def get_leaderboard(top_n: int = 10) -> list[tuple[str, int]]:
+    if db is not None:
+        cursor = db.balances.find().sort("bal", -1).limit(top_n)
+        return [(doc["_id"], doc.get("bal", 0)) for doc in cursor]
+
     data = _load_all()
     return sorted(data.items(), key=lambda x: x[1], reverse=True)[:top_n]
 
@@ -188,9 +241,29 @@ def _save_stats(data: dict) -> None:
 
 def record_game(user_id: int, game: str, won: bool, amount: int = 0):
     """Record a game result for stats tracking."""
+    uid = str(user_id)
+    if db is not None:
+        update = {
+            "$inc": {
+                "games": 1,
+                "wins": 1 if won else 0,
+                "losses": 0 if won else 1,
+                "total_won": amount if won else 0,
+                "total_lost": amount if not won else 0,
+                f"by_game.{game}.played": 1,
+                f"by_game.{game}.won": 1 if won else 0
+            }
+        }
+        if won:
+            doc = db.stats.find_one({"_id": uid}, {"biggest_win": 1})
+            bw = doc.get("biggest_win", 0) if doc else 0
+            if amount > bw:
+                update["$set"] = {"biggest_win": amount}
+        db.stats.update_one({"_id": uid}, update, upsert=True)
+        return
+
     with _data_lock:
         data = _load_stats()
-        uid = str(user_id)
         if uid not in data:
             data[uid] = {"games": 0, "wins": 0, "losses": 0,
                          "total_won": 0, "total_lost": 0, "biggest_win": 0,
@@ -214,12 +287,24 @@ def record_game(user_id: int, game: str, won: bool, amount: int = 0):
 
 def get_user_stats(user_id: int) -> dict:
     """Get a user's game stats."""
+    uid = str(user_id)
+    default = {
+        "games": 0, "wins": 0, "losses": 0,
+        "total_won": 0, "total_lost": 0, "biggest_win": 0,
+        "by_game": {}
+    }
+    if db is not None:
+        doc = db.stats.find_one({"_id": uid})
+        if doc:
+            # Merge with default to ensure keys exist
+            merged = default.copy()
+            merged.update(doc)
+            return merged
+        return default
+
     with _data_lock:
         data = _load_stats()
-        return data.get(str(user_id), {
-            "games": 0, "wins": 0, "losses": 0,
-            "total_won": 0, "total_lost": 0, "biggest_win": 0,
-            "by_game": {}})
+        return data.get(uid, default)
 
 
 # ── Shop: Color Roles ─────────────────────────────────────────────────────────
@@ -254,6 +339,31 @@ def _save_shop(data: dict) -> None:
     with open(tmp, "w") as f:
         json.dump(data, f, indent=2)
     os.replace(tmp, SHOP_PATH)
+
+
+def get_user_roles(user_id: int) -> list[str]:
+    uid = str(user_id)
+    if db is not None:
+        doc = db.shop.find_one({"_id": uid})
+        return doc.get("roles", []) if doc else []
+
+    with _data_lock:
+        return _load_shop().get(uid, [])
+
+
+def add_user_role(user_id: int, role_name: str) -> None:
+    uid = str(user_id)
+    if db is not None:
+        db.shop.update_one({"_id": uid}, {"$addToSet": {"roles": role_name}}, upsert=True)
+        return
+
+    with _data_lock:
+        shop_data = _load_shop()
+        if uid not in shop_data:
+            shop_data[uid] = []
+        if role_name not in shop_data[uid]:
+            shop_data[uid].append(role_name)
+            _save_shop(shop_data)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -315,7 +425,26 @@ def _save_daily(data: dict[int, dict]) -> None:
     os.replace(tmp, DAILY_PATH)
 
 
-_daily_cooldowns: dict[int, dict] = _load_daily()
+def get_daily_data(user_id: int) -> dict:
+    uid = str(user_id)
+    default = {"last": 0, "streak": 0}
+    if db is not None:
+        doc = db.daily.find_one({"_id": uid})
+        if doc:
+            return {"last": doc.get("last", 0), "streak": doc.get("streak", 0)}
+        return default
+    with _data_lock:
+        return _load_daily().get(user_id, default)
+
+def set_daily_data(user_id: int, data: dict) -> None:
+    uid = str(user_id)
+    if db is not None:
+        db.daily.update_one({"_id": uid}, {"$set": data}, upsert=True)
+        return
+    with _data_lock:
+        daily_dict = _load_daily()
+        daily_dict[user_id] = data
+        _save_daily(daily_dict)
 
 
 @bot.command(name="balance", aliases=["bal"])
@@ -415,7 +544,7 @@ async def removecoins(ctx: commands.Context, member: discord.Member = None, amou
 async def daily(ctx: commands.Context):
     """Claim your daily coin bonus with streak tracking."""
     now = time.time()
-    user_data = _daily_cooldowns.get(ctx.author.id, {"last": 0, "streak": 0})
+    user_data = get_daily_data(ctx.author.id)
     last = user_data.get("last", 0)
     streak = user_data.get("streak", 0)
     remaining = DAILY_COOLDOWN - (now - last)
@@ -442,8 +571,7 @@ async def daily(ctx: commands.Context):
     # Calculate bonus
     is_streak_day = streak % DAILY_STREAK_BONUS == 0
     amount = DAILY_AMOUNT * DAILY_STREAK_MULTIPLIER if is_streak_day else DAILY_AMOUNT
-    _daily_cooldowns[ctx.author.id] = {"last": now, "streak": streak}
-    _save_daily(_daily_cooldowns)
+    set_daily_data(ctx.author.id, {"last": now, "streak": streak})
     new_bal = add_balance(ctx.author.id, amount, STARTING)
     if is_streak_day:
         embed = discord.Embed(
@@ -497,7 +625,7 @@ async def profile(ctx: commands.Context, member: discord.Member = None):
     target = member or ctx.author
     bal = get_balance(target.id, STARTING)
     stats = get_user_stats(target.id)
-    daily_data = _daily_cooldowns.get(target.id, {"streak": 0})
+    daily_data = get_daily_data(target.id)
     streak = daily_data.get("streak", 0) if isinstance(daily_data, dict) else 0
 
     embed = discord.Embed(title=f"{target.display_name}'s Profile", color=Colors.PROFILE)
@@ -519,8 +647,7 @@ async def profile(ctx: commands.Context, member: discord.Member = None):
     embed.add_field(name="🏆 W/L", value=f"{wins}W / {losses}L", inline=True)
     embed.add_field(name="⭐ Favorite Game", value=fav_game.title(), inline=True)
     
-    shop_data = _load_shop()
-    user_roles = shop_data.get(str(target.id), [])
+    user_roles = get_user_roles(target.id)
     if user_roles:
         owned = ", ".join(COLOR_ROLES[r]["name"] for r in user_roles if r in COLOR_ROLES)
         embed.add_field(name="🎨 Color Roles Owned", value=owned, inline=False)
@@ -575,11 +702,8 @@ async def buy(ctx: commands.Context, role_name: str = None):
         await ctx.send(embed=discord.Embed(description=f"❌ You need {coin(role_data['price'])} to buy this.", color=Colors.ERROR))
         return
 
-    shop_data = _load_shop()
-    uid = str(ctx.author.id)
-    if uid not in shop_data:
-        shop_data[uid] = []
-    if role_name in shop_data[uid]:
+    user_roles = get_user_roles(ctx.author.id)
+    if role_name in user_roles:
         await ctx.send(embed=discord.Embed(description="❌ You already own this role!", color=Colors.ERROR))
         return
 
@@ -597,7 +721,7 @@ async def buy(ctx: commands.Context, role_name: str = None):
 
     try:
         # Remove any other purchased color roles to keep things clean (optional, but good for single-color usage)
-        roles_to_remove = [discord.utils.get(guild.roles, name=COLOR_ROLES[r]["name"]) for r in shop_data[uid] if r in COLOR_ROLES]
+        roles_to_remove = [discord.utils.get(guild.roles, name=COLOR_ROLES[r]["name"]) for r in user_roles if r in COLOR_ROLES]
         roles_to_remove = [r for r in roles_to_remove if r and r in ctx.author.roles]
         if roles_to_remove:
             await ctx.author.remove_roles(*roles_to_remove)
@@ -608,8 +732,7 @@ async def buy(ctx: commands.Context, role_name: str = None):
         return
 
     add_balance(ctx.author.id, -role_data["price"], STARTING)
-    shop_data[uid].append(role_name)
-    _save_shop(shop_data)
+    add_user_role(ctx.author.id, role_name)
 
     embed = discord.Embed(
         title="🎉 Purchase Successful!",
