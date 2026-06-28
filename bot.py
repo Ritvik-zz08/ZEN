@@ -22,6 +22,16 @@ from dataclasses import dataclass, field
 from typing import Optional
 from google import genai
 
+from games.multiplayer import (
+    get_help_multiplayer,
+    cancel_multiplayer,
+    channel_game_name,
+    handle_multiplayer_message,
+    setup_multiplayer,
+    try_lock_channel,
+    unlock_channel,
+)
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -156,9 +166,30 @@ def coin(amount: int) -> str:
 #  ECONOMY COMMANDS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-_daily_cooldowns: dict[int, float] = {}
+DAILY_PATH = os.path.join(DATA_DIR, "daily.json")
 DAILY_AMOUNT = 200
 DAILY_COOLDOWN = 86_400
+
+
+def _load_daily() -> dict[int, float]:
+    if not os.path.exists(DAILY_PATH):
+        return {}
+    try:
+        with open(DAILY_PATH, "r") as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def _save_daily(data: dict[int, float]) -> None:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    tmp = DAILY_PATH + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump({str(k): v for k, v in data.items()}, f, indent=2)
+    os.replace(tmp, DAILY_PATH)
+
+
+_daily_cooldowns: dict[int, float] = _load_daily()
 
 
 @bot.command(name="balance", aliases=["bal"])
@@ -267,8 +298,9 @@ async def daily(ctx: commands.Context):
             description=f"⏳ You already claimed today! Come back in **{hours}h {minutes}m**.",
             color=0xFFA500))
         return
-    _daily_cooldowns[ctx.author.id] = now
-    new_bal = add_balance(ctx.author.id, DAILY_AMOUNT, STARTING)
+        _daily_cooldowns[ctx.author.id] = now
+        _save_daily(_daily_cooldowns)
+        new_bal = add_balance(ctx.author.id, DAILY_AMOUNT, STARTING)
     embed = discord.Embed(
         title="📅 Daily Bonus Claimed!",
         description=f"You received {coin(DAILY_AMOUNT)} Coins!\n**New balance:** {coin(new_bal)}",
@@ -1558,6 +1590,7 @@ async def _uno_end_game(game: UnoGame):
 
     # Clean up
     _active_uno.pop(game.channel.id, None)
+    unlock_channel(game.channel.id)
 
 
 class UnoDrawPlayView(View):
@@ -1863,9 +1896,10 @@ class UnoLobbyView(View):
 @bot.command(name="uno")
 async def uno(ctx: commands.Context, entry_fee: int = 0):
     """Start a multiplayer UNO game! Entry fee is optional."""
-    if ctx.channel.id in _active_uno:
+    busy = channel_game_name(ctx.channel.id)
+    if busy or ctx.channel.id in _active_uno:
         await ctx.send(embed=discord.Embed(
-            description="❌ There's already an active UNO game in this channel!",
+            description=f"❌ There's already an active **{busy or 'UNO'}** game in this channel!",
             color=0xFF4444))
         return
 
@@ -1887,6 +1921,7 @@ async def uno(ctx: commands.Context, entry_fee: int = 0):
     game = UnoGame(host=ctx.author, entry_fee=entry_fee, channel=ctx.channel)
     game.add_player(ctx.author)
     _active_uno[ctx.channel.id] = game
+    try_lock_channel(ctx.channel.id, "uno")
 
     lobby_view = UnoLobbyView(game)
     msg = await ctx.send(embed=lobby_view.build_embed(), view=lobby_view)
@@ -2149,6 +2184,7 @@ class AtlasLobbyView(View):
 
         if self.game.channel.id in _active_atlas:
             del _active_atlas[self.game.channel.id]
+            unlock_channel(self.game.channel.id)
 
         embed = discord.Embed(title="❌ Game Cancelled", description="The Atlas lobby was cancelled by the host.", color=0xFF4444)
         for child in self.children:
@@ -2175,6 +2211,7 @@ async def _atlas_send_turn(game: AtlasGame, error_msg: str = ""):
         await game.channel.send(embed=embed)
         if game.channel.id in _active_atlas:
             del _active_atlas[game.channel.id]
+            unlock_channel(game.channel.id)
         return
 
     player = game.current_player
@@ -2275,6 +2312,9 @@ async def on_message(message: discord.Message):
                             pass
                         return # Stop processing so it doesn't run as a command
 
+    if await handle_multiplayer_message(message, config["prefix"]):
+        return
+
     # Continue processing commands normally
     await bot.process_commands(message)
 
@@ -2282,9 +2322,10 @@ async def on_message(message: discord.Message):
 @bot.command(name="atlas_start")
 async def atlas_start(ctx: commands.Context):
     """Start a multiplayer ATLAS game!"""
-    if ctx.channel.id in _active_atlas:
+    busy = channel_game_name(ctx.channel.id)
+    if busy or ctx.channel.id in _active_atlas:
         await ctx.send(embed=discord.Embed(
-            description="❌ There's already an active ATLAS game in this channel!",
+            description=f"❌ There's already an active **{busy or 'ATLAS'}** game in this channel!",
             color=0xFF4444))
         return
 
@@ -2294,6 +2335,7 @@ async def atlas_start(ctx: commands.Context):
     game = AtlasGame(host=ctx.author, channel=ctx.channel)
     game.add_player(ctx.author)
     _active_atlas[ctx.channel.id] = game
+    try_lock_channel(ctx.channel.id, "atlas")
 
     lobby_view = AtlasLobbyView(game)
     msg = await ctx.send(embed=lobby_view.build_embed(), view=lobby_view)
@@ -2302,13 +2344,19 @@ async def atlas_start(ctx: commands.Context):
 
 @bot.command(name="cancel")
 async def cancel_game(ctx: commands.Context):
-    """Cancel an active UNO or ATLAS lobby/game."""
+    """Cancel an active multiplayer lobby/game in this channel."""
     canceled = False
+
+    mp_msg = await cancel_multiplayer(ctx.channel.id, ctx.author.id, config["owner_id"])
+    if mp_msg:
+        await ctx.send(embed=discord.Embed(description=mp_msg, color=0x2ECC71))
+        canceled = True
     
     if ctx.channel.id in _active_uno:
         game = _active_uno[ctx.channel.id]
         if ctx.author.id == game.host.id or ctx.author.id == config["owner_id"]:
             del _active_uno[ctx.channel.id]
+            unlock_channel(ctx.channel.id)
             # Refund UNO players
             if game.entry_fee > 0:
                 for p in game.players:
@@ -2322,6 +2370,7 @@ async def cancel_game(ctx: commands.Context):
             if game.turn_task and not game.turn_task.done():
                 game.turn_task.cancel()
             del _active_atlas[ctx.channel.id]
+            unlock_channel(ctx.channel.id)
             await ctx.send(embed=discord.Embed(description="✅ ATLAS game cancelled.", color=0x2ECC71))
             canceled = True
 
@@ -2372,10 +2421,17 @@ async def custom_help(ctx: commands.Context):
         name="🌍  ATLAS",
         value=(
             f"`{p}atlas_start` — Start a multiplayer geography word game\n"
-            f"`{p}cancel` — Cancel the active Atlas or UNO lobby\n"
             f"  • Name a City, State, or Country starting with the last letter\n"
             f"  • 3 lives, 30 seconds per turn!"
         ), inline=False)
+    embed.add_field(
+        name="👥  Multiplayer Games",
+        value=get_help_multiplayer(p) + f"\n`{p}cancel` — Cancel any active lobby/game in this channel",
+        inline=False)
+    embed.add_field(
+        name="🤖  Other",
+        value=f"`{p}ai [question]` — Chat with Gemini AI",
+        inline=False)
     embed.add_field(
         name="🔧  Admin (Owner Only)",
         value=(
@@ -2511,6 +2567,8 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
 
 async def main():
     os.makedirs(DATA_DIR, exist_ok=True)
+    setup_multiplayer(bot, config=config, starting=STARTING,
+                      get_balance=get_balance, add_balance=add_balance, coin_fn=coin)
 
     # Start web server if running on Render (PORT env var is set)
     if "PORT" in os.environ:
