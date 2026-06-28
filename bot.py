@@ -73,16 +73,18 @@ def load_config() -> dict:
 config = load_config()
 
 MONGO_URI = os.environ.get("MONGO_URI")
+print(f"[DB] MONGO_URI found: {bool(MONGO_URI)}", flush=True)
 if MONGO_URI:
     try:
         mongo_client = pymongo.MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
         mongo_client.server_info()
         db = mongo_client["zenbot"]
-        print("[!] Successfully connected to MongoDB.")
+        print("[DB] Successfully connected to MongoDB!", flush=True)
     except Exception as e:
-        print(f"[!] Failed to connect to MongoDB: {e}")
+        print(f"[DB] Failed to connect to MongoDB: {e}", flush=True)
         db = None
 else:
+    print("[DB] No MONGO_URI set — using local JSON files.", flush=True)
     db = None
 
 # ═══════════════════════════════════════════════════════════════════════════════
